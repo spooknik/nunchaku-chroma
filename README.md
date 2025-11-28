@@ -146,6 +146,7 @@ The installer adds the following files:
 
 ## Folder Structure:
 
+```
 nunchaku-chroma/
 ├── install.py                    # Installer script
 ├── nunchaku_chroma/
@@ -161,6 +162,6 @@ nunchaku-chroma/
 │       ├── wrapper.py            # ComfyUI wrapper with LoRA loading
 │       ├── loader.py             # DiT loader node
 │       └── lora.py               # LoRA loader nodes
-
+```
 
 
