@@ -144,36 +144,23 @@ The installer adds the following files:
 | ComfyUI-nunchaku | `nodes/models/chroma.py` | Model loader node |
 | ComfyUI-nunchaku | `nodes/lora/chroma.py` | LoRA loader nodes |
 
-## Troubleshooting
+## Folder Structure:
 
-### "mat1 and mat2 shapes cannot be multiplied"
+nunchaku-chroma/
+├── install.py                    # Installer script
+├── nunchaku_chroma/
+│   ├── __init__.py
+│   ├── transformer_chroma.py     # Main transformer with LoRA support
+│   ├── patcher.py
+│   ├── lora/
+│   │   ├── __init__.py
+│   │   ├── diffusers_converter.py   # Converts ComfyUI LoRA → diffusers format
+│   │   └── nunchaku_converter.py    # Merges LoRA with SVD branch
+│   └── comfyui/
+│       ├── __init__.py
+│       ├── wrapper.py            # ComfyUI wrapper with LoRA loading
+│       ├── loader.py             # DiT loader node
+│       └── lora.py               # LoRA loader nodes
 
-This usually means latent packing is not working correctly. Make sure you're using the ComfyUI wrapper which handles the conversion between 16-channel and 64-channel formats.
 
-### "missing required positional argument 'y'"
 
-The wrapper's forward method needs `y=None` and `guidance=None` as optional keyword arguments. This is handled in the included wrapper.
-
-### "No module named 'nunchaku.lora.chroma'"
-
-The LoRA converter files weren't installed. Re-run the installer:
-
-```bash
-python install.py C:\ComfyUI
-```
-
-### Node doesn't appear in ComfyUI
-
-1. Make sure nunchaku has Chroma support: `python -m nunchaku_chroma.patcher --verify`
-2. Make sure ComfyUI-nunchaku was patched: Check for `wrappers/chroma.py` and `nodes/models/chroma.py`
-3. Restart ComfyUI after patching
-
-### LoRA has no effect
-
-1. Check that the LoRA format is supported (ComfyUI/Kohya or diffusers format)
-2. Verify the LoRA was trained for Chroma (not FLUX - they have different architectures)
-3. Check ComfyUI logs for any conversion warnings
-
-## License
-
-MIT License
