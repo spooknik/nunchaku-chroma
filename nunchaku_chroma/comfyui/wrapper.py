@@ -8,7 +8,18 @@ from einops import rearrange, repeat
 from torch import nn
 
 from nunchaku.lora.flux.compose import compose_lora
-from nunchaku.lora.flux.utils import load_state_dict_in_safetensors
+
+# Import Chroma LoRA converter - try multiple import paths for flexibility
+try:
+    # When installed as part of nunchaku-chroma package
+    from ..lora.diffusers_converter import to_diffusers as chroma_to_diffusers
+except ImportError:
+    try:
+        # When installed to ComfyUI-nunchaku wrappers directory
+        from .lora.diffusers_converter import to_diffusers as chroma_to_diffusers
+    except ImportError:
+        # Fallback to nunchaku's chroma LoRA converter
+        from nunchaku.lora.chroma.diffusers_converter import to_diffusers as chroma_to_diffusers
 
 
 class ComfyChromaWrapper(nn.Module):
@@ -209,14 +220,14 @@ class ComfyChromaWrapper(nn.Module):
             for i in range(len(self.loras)):
                 meta = self.loras[i]
                 if i >= len(model.comfy_lora_meta_list):
-                    # New LoRA - load state dict
-                    sd = load_state_dict_in_safetensors(meta[0])
+                    # New LoRA - load and convert to diffusers format
+                    sd = chroma_to_diffusers(meta[0])
                     model.comfy_lora_meta_list.append(meta)
                     model.comfy_lora_sd_list.append(sd)
                 elif model.comfy_lora_meta_list[i] != meta:
                     # LoRA changed
                     if meta[0] != model.comfy_lora_meta_list[i][0]:
-                        sd = load_state_dict_in_safetensors(meta[0])
+                        sd = chroma_to_diffusers(meta[0])
                         model.comfy_lora_sd_list[i] = sd
                     model.comfy_lora_meta_list[i] = meta
                 lora_to_be_composed.append(({k: v for k, v in model.comfy_lora_sd_list[i].items()}, meta[1]))

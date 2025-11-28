@@ -120,7 +120,7 @@ def get_source_dir() -> Path:
 
 
 def install_to_nunchaku(nunchaku_path: Path, source_dir: Path, dry_run: bool = False) -> bool:
-    """Install Chroma transformer to nunchaku package."""
+    """Install Chroma transformer and LoRA converter to nunchaku package."""
     print(f"\n📦 Installing to nunchaku: {nunchaku_path}")
 
     # Copy transformer_chroma.py
@@ -137,6 +137,32 @@ def install_to_nunchaku(nunchaku_path: Path, source_dir: Path, dry_run: bool = F
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dst)
         print(f"  ✓ Copied: transformer_chroma.py")
+
+    # Copy LoRA converter files
+    lora_dir = nunchaku_path / "lora" / "chroma"
+    if not lora_dir.exists():
+        if dry_run:
+            print(f"  Would create: lora/chroma/")
+        else:
+            lora_dir.mkdir(parents=True, exist_ok=True)
+            print(f"  ✓ Created: lora/chroma/")
+
+    lora_files = [
+        ("lora/__init__.py", "lora/chroma/__init__.py"),
+        ("lora/diffusers_converter.py", "lora/chroma/diffusers_converter.py"),
+        ("lora/nunchaku_converter.py", "lora/chroma/nunchaku_converter.py"),
+    ]
+
+    for src_rel, dst_rel in lora_files:
+        src_file = source_dir / src_rel
+        dst_file = nunchaku_path / dst_rel
+        if src_file.exists():
+            if dry_run:
+                print(f"  Would copy: {dst_rel}")
+            else:
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(src_file, dst_file)
+                print(f"  ✓ Copied: {dst_rel}")
 
     # Patch __init__.py files
     init_files = [
@@ -207,8 +233,9 @@ def install_to_comfyui_nunchaku(comfyui_nunchaku_path: Path, source_dir: Path, d
     # Create directories
     wrappers_dir = comfyui_nunchaku_path / "wrappers"
     nodes_models_dir = comfyui_nunchaku_path / "nodes" / "models"
+    wrappers_lora_dir = comfyui_nunchaku_path / "wrappers" / "lora"
 
-    for d in [wrappers_dir, nodes_models_dir]:
+    for d in [wrappers_dir, nodes_models_dir, wrappers_lora_dir]:
         if not d.exists():
             if dry_run:
                 print(f"  Would create: {d}")
@@ -224,6 +251,22 @@ def install_to_comfyui_nunchaku(comfyui_nunchaku_path: Path, source_dir: Path, d
         else:
             shutil.copy(wrapper_src, wrapper_dst)
             print(f"  ✓ Copied: wrappers/chroma.py")
+
+    # Copy LoRA converter files for wrapper import
+    lora_files = [
+        (source_dir / "lora" / "__init__.py", wrappers_lora_dir / "__init__.py"),
+        (source_dir / "lora" / "diffusers_converter.py", wrappers_lora_dir / "diffusers_converter.py"),
+        (source_dir / "lora" / "nunchaku_converter.py", wrappers_lora_dir / "nunchaku_converter.py"),
+    ]
+
+    for src_file, dst_file in lora_files:
+        if src_file.exists():
+            if dry_run:
+                print(f"  Would copy: {dst_file.relative_to(comfyui_nunchaku_path)}")
+            else:
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(src_file, dst_file)
+                print(f"  ✓ Copied: {dst_file.relative_to(comfyui_nunchaku_path)}")
 
     # Copy loader
     loader_src = comfyui_src / "loader.py"

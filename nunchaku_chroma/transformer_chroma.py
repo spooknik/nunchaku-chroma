@@ -500,103 +500,124 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
             if hasattr(block, 'attn') and hasattr(block.attn, 'set_processor'):
                 block.attn.set_processor(impl)
 
-    def update_lora_params(self, lora_state_dict: dict[str, torch.Tensor], strength: float = 1.0):
-        """
-        Update the model with LoRA parameters.
+    def _init_lora_state(self):
+        """Initialize LoRA tracking state if not already done."""
+        if not hasattr(self, '_original_in_channels'):
+            self._original_in_channels = self.config.in_channels
 
-        This method applies LoRA weights to the quantized linear layers (SVDQW4A4Linear).
-        The LoRA weights are expected in the Diffusers format with keys like:
-        - `transformer_blocks.*.attn.to_qkv.lora_A.weight`
-        - `transformer_blocks.*.attn.to_qkv.lora_B.weight`
-        - etc.
+        # ComfyUI LoRA tracking lists
+        if not hasattr(self, 'comfy_lora_meta_list'):
+            self.comfy_lora_meta_list = []
+        if not hasattr(self, 'comfy_lora_sd_list'):
+            self.comfy_lora_sd_list = []
+
+        # Store original SVD weights for reset
+        if not hasattr(self, '_original_svd_weights'):
+            self._original_svd_weights = {}
+            for name, module in self.named_modules():
+                if isinstance(module, SVDQW4A4Linear):
+                    self._original_svd_weights[f"{name}.proj_down"] = module.proj_down.data.clone()
+                    self._original_svd_weights[f"{name}.proj_up"] = module.proj_up.data.clone()
+
+    def update_lora_params(self, state_dict: dict[str, torch.Tensor]):
+        """
+        Update the model with new LoRA parameters.
+
+        This method merges LoRA weights with the existing SVD low-rank branch.
+        The LoRA weights are converted to Nunchaku format and merged with the
+        existing proj_down/proj_up tensors.
 
         Parameters
         ----------
-        lora_state_dict : dict[str, torch.Tensor]
-            The LoRA state dict in Diffusers format.
-        strength : float, optional
-            Scaling factor for the LoRA weights (default: 1.0).
+        state_dict : dict[str, torch.Tensor]
+            State dict containing LoRA weights. Keys should be in the format:
+            ``"layer_name.lora_A.weight"`` and ``"layer_name.lora_B.weight"``.
         """
-        device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype
+        import logging
 
-        # Convert Diffusers LoRA format to nunchaku format and apply
+        from ...lora.chroma.nunchaku_converter import convert_chroma_lora_to_nunchaku
+
+        logger = logging.getLogger(__name__)
+        self._init_lora_state()
+
+        # First reset to original weights
+        self._restore_original_weights()
+
+        # Get current model state dict
+        model_state_dict = {}
         for name, module in self.named_modules():
             if isinstance(module, SVDQW4A4Linear):
-                # Check for LoRA A/B weights for this module
-                lora_a_key = f"transformer.{name}.lora_A.weight"
-                lora_b_key = f"transformer.{name}.lora_B.weight"
+                model_state_dict[f"{name}.proj_down"] = module.proj_down.data
+                model_state_dict[f"{name}.proj_up"] = module.proj_up.data
 
-                if lora_a_key in lora_state_dict and lora_b_key in lora_state_dict:
-                    lora_a = lora_state_dict[lora_a_key].to(device=device, dtype=dtype)
-                    lora_b = lora_state_dict[lora_b_key].to(device=device, dtype=dtype)
+        # Convert and merge LoRA
+        try:
+            updated_weights = convert_chroma_lora_to_nunchaku(state_dict, model_state_dict, strength=1.0)
 
-                    # Apply LoRA: W' = W + strength * B @ A
-                    # For SVDQW4A4Linear, we update proj_down and proj_up
-                    if hasattr(module, 'proj_down') and hasattr(module, 'proj_up'):
-                        # Scale and set LoRA weights
-                        module.proj_down.data = (lora_a * strength).contiguous()
-                        module.proj_up.data = (lora_b * strength).contiguous()
+            # Apply updated weights
+            for key, value in updated_weights.items():
+                parts = key.rsplit(".", 1)
+                if len(parts) == 2:
+                    module_path, param_name = parts
+                    # Find the module
+                    module = self
+                    for part in module_path.split("."):
+                        if part.isdigit():
+                            module = module[int(part)]
+                        else:
+                            module = getattr(module, part)
+
+                    if hasattr(module, param_name):
+                        param = getattr(module, param_name)
+                        param.data = value.to(param.device, param.dtype)
+
+            logger.info(f"Applied Chroma LoRA: updated {len(updated_weights)} weight tensors")
+        except Exception as e:
+            logger.error(f"Failed to apply Chroma LoRA: {e}")
+            raise
+
+    def _restore_original_weights(self):
+        """Restore original SVD weights before applying new LoRA."""
+        if not hasattr(self, '_original_svd_weights'):
+            return
+
+        for key, value in self._original_svd_weights.items():
+            parts = key.rsplit(".", 1)
+            if len(parts) == 2:
+                module_path, param_name = parts
+                module = self
+                for part in module_path.split("."):
+                    if part.isdigit():
+                        module = module[int(part)]
+                    else:
+                        module = getattr(module, part)
+
+                if hasattr(module, param_name):
+                    param = getattr(module, param_name)
+                    param.data = value.clone().to(param.device, param.dtype)
 
     def reset_lora(self):
         """
         Reset all LoRA parameters to their default state.
 
-        This removes any applied LoRA effects by resetting the proj_down/proj_up
-        weights in all SVDQW4A4Linear layers to zeros.
+        This restores the original SVD weights that were saved when the model
+        was first loaded.
         """
-        for name, module in self.named_modules():
-            if isinstance(module, SVDQW4A4Linear):
-                if hasattr(module, 'proj_down') and hasattr(module, 'proj_up'):
-                    # Reset LoRA weights to zero (no effect)
-                    if module.proj_down is not None:
-                        module.proj_down.data.zero_()
-                    if module.proj_up is not None:
-                        module.proj_up.data.zero_()
+        import logging
 
-        # Reset x_embedder if needed
-        self.reset_x_embedder()
+        logger = logging.getLogger(__name__)
+        self._init_lora_state()
 
-        # Clear LoRA tracking lists
-        self.comfy_lora_meta_list = []
-        self.comfy_lora_sd_list = []
+        self._restore_original_weights()
+        logger.info("Reset Chroma model to original SVD weights (LoRA removed)")
 
     def reset_x_embedder(self):
         """
         Reset the x_embedder module if the input channel count has changed.
-
-        This is used to remove the effect of LoRAs that modify input channels.
         """
-        if self._original_in_channels is None:
-            return
-
-        current_in_channels = self.config.in_channels if hasattr(self.config, 'in_channels') else self.x_embedder.in_features
-
-        if self._original_in_channels != current_in_channels:
-            # x_embedder was modified, need to reset
-            old_module = self.x_embedder
-            new_module = torch.nn.Linear(
-                in_features=self._original_in_channels,
-                out_features=old_module.out_features,
-                bias=old_module.bias is not None,
-                device=old_module.weight.device,
-                dtype=old_module.weight.dtype,
-            )
-
-            # Copy original weights
-            if self._base_state_dict is not None and 'x_embedder.weight' in self._base_state_dict:
-                new_module.weight.data.copy_(self._base_state_dict['x_embedder.weight'])
-                if new_module.bias is not None and 'x_embedder.bias' in self._base_state_dict:
-                    new_module.bias.data.copy_(self._base_state_dict['x_embedder.bias'])
-            else:
-                # Fallback: truncate existing weights
-                new_module.weight.data.copy_(old_module.weight.data[:, :self._original_in_channels])
-                if new_module.bias is not None:
-                    new_module.bias.data.copy_(old_module.bias.data)
-
-            self.x_embedder = new_module
-            if hasattr(self.config, 'in_channels'):
-                setattr(self.config, 'in_channels', self._original_in_channels)
+        self._init_lora_state()
+        # For Chroma, x_embedder is typically not modified by LoRA
+        pass
 
     def forward(
         self,

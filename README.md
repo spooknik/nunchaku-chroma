@@ -19,7 +19,26 @@ Since Chroma reuses FLUX's CUDA kernels, **no recompilation is needed** - only P
 - [Nunchaku](https://github.com/mit-han-lab/nunchaku) already installed
 - A quantized Chroma model (`.safetensors` file)
 
-### Install nunchaku-chroma
+### Quick Install (ComfyUI)
+
+The simplest way to install is using the standalone installer:
+
+```bash
+git clone https://github.com/your-username/nunchaku-chroma.git
+cd nunchaku-chroma
+python install.py C:\ComfyUI   # Windows
+python install.py ~/ComfyUI    # Linux/Mac
+```
+
+Or with auto-detection:
+
+```bash
+python install.py --auto-detect
+```
+
+Use `--dry-run` to see what would be changed without making modifications.
+
+### Alternative: Install as Python Package
 
 ```bash
 pip install nunchaku-chroma
@@ -33,27 +52,14 @@ cd nunchaku-chroma
 pip install -e .
 ```
 
-### Patch your nunchaku installation
-
-After installing, run the patcher to add Chroma support:
+Then run the patcher:
 
 ```bash
 python -m nunchaku_chroma.patcher
+python -m nunchaku_chroma.patcher --comfyui /path/to/ComfyUI-nunchaku  # Optional
 ```
 
-This will:
-1. Copy `transformer_chroma.py` to your nunchaku installation
-2. Update the `__init__.py` files to export `NunchakuChromaTransformer2DModel`
-
-### Optional: Patch ComfyUI-nunchaku
-
-If you use ComfyUI, you can also patch ComfyUI-nunchaku:
-
-```bash
-python -m nunchaku_chroma.patcher --comfyui /path/to/ComfyUI-nunchaku
-```
-
-### Verify installation
+### Verify Installation
 
 ```bash
 python -m nunchaku_chroma.patcher --verify
@@ -93,45 +99,50 @@ image.save("output.png")
 
 ### ComfyUI
 
-After patching ComfyUI-nunchaku:
+After installing:
 
 1. Place your quantized Chroma model in `ComfyUI/models/diffusion_models/`
 2. In ComfyUI, use the **"Nunchaku Chroma DiT Loader"** node
 3. Connect to a standard FLUX-compatible sampling workflow
 
-### LoRA Support
+## LoRA Support
 
-Chroma LoRAs are supported! In ComfyUI:
+Chroma LoRAs are fully supported with automatic format conversion.
+
+### In ComfyUI
 
 1. Place your Chroma LoRA files in `ComfyUI/models/loras/`
 2. Use the **"Nunchaku Chroma LoRA Loader"** node after the model loader
 3. You can chain multiple LoRA nodes, or use **"Nunchaku Chroma LoRA Stack"** for multiple LoRAs in one node
 
-Note: Chroma LoRAs use the same format as FLUX LoRAs (`lora_unet_double_blocks_*` and `lora_unet_single_blocks_*`).
+### How LoRA Works
 
-## Patcher Options
+The LoRA implementation:
 
-```
-python -m nunchaku_chroma.patcher [options]
+1. **Converts** ComfyUI/Kohya format (`lora_unet_double_blocks_*`) to diffusers format
+2. **Merges** LoRA weights with the existing SVD low-rank branch by concatenation
+3. **Preserves** the original quantization compensation while adding the LoRA effect
 
-Options:
-    --verify        Only verify if Chroma support is installed
-    --comfyui PATH  Also patch ComfyUI-nunchaku at the specified path
-    --dry-run       Show what would be done without making changes
-```
+This approach is different from standard LoRA application - instead of adding LoRA as a separate computation, we concatenate the LoRA weights with the existing SVD decomposition weights. This maintains inference speed while supporting LoRA effects.
 
-## How it Works
+### Supported LoRA Formats
 
-The patcher adds the following files:
+- **ComfyUI/Kohya format**: `lora_unet_double_blocks_*`, `lora_unet_single_blocks_*`
+- **Diffusers format**: `transformer_blocks.*.lora_A.weight`, etc.
+
+## File Structure
+
+The installer adds the following files:
 
 | Location | File | Purpose |
 |----------|------|---------|
-| nunchaku | `models/transformers/transformer_chroma.py` | Core Chroma transformer implementation with LoRA support |
-| ComfyUI-nunchaku | `wrappers/chroma.py` | ComfyUI latent format adapter (packs 16ch → 64ch) |
-| ComfyUI-nunchaku | `nodes/models/chroma.py` | ComfyUI loader node |
-| ComfyUI-nunchaku | `nodes/lora/chroma.py` | ComfyUI LoRA loader nodes |
-
-It also updates the `__init__.py` files to export `NunchakuChromaTransformer2DModel`.
+| nunchaku | `models/transformers/transformer_chroma.py` | Core Chroma transformer with LoRA support |
+| nunchaku | `lora/chroma/diffusers_converter.py` | Converts ComfyUI LoRA format to diffusers |
+| nunchaku | `lora/chroma/nunchaku_converter.py` | Merges LoRA with SVD branch |
+| ComfyUI-nunchaku | `wrappers/chroma.py` | Latent format adapter (16ch ↔ 64ch) |
+| ComfyUI-nunchaku | `wrappers/lora/` | LoRA converter copies for wrapper imports |
+| ComfyUI-nunchaku | `nodes/models/chroma.py` | Model loader node |
+| ComfyUI-nunchaku | `nodes/lora/chroma.py` | LoRA loader nodes |
 
 ## Troubleshooting
 
@@ -143,11 +154,25 @@ This usually means latent packing is not working correctly. Make sure you're usi
 
 The wrapper's forward method needs `y=None` and `guidance=None` as optional keyword arguments. This is handled in the included wrapper.
 
+### "No module named 'nunchaku.lora.chroma'"
+
+The LoRA converter files weren't installed. Re-run the installer:
+
+```bash
+python install.py C:\ComfyUI
+```
+
 ### Node doesn't appear in ComfyUI
 
 1. Make sure nunchaku has Chroma support: `python -m nunchaku_chroma.patcher --verify`
 2. Make sure ComfyUI-nunchaku was patched: Check for `wrappers/chroma.py` and `nodes/models/chroma.py`
 3. Restart ComfyUI after patching
+
+### LoRA has no effect
+
+1. Check that the LoRA format is supported (ComfyUI/Kohya or diffusers format)
+2. Verify the LoRA was trained for Chroma (not FLUX - they have different architectures)
+3. Check ComfyUI logs for any conversion warnings
 
 ## License
 
