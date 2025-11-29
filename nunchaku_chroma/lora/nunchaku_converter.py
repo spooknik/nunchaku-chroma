@@ -151,11 +151,11 @@ def convert_chroma_lora_to_nunchaku(
     fused_qkv: dict[str, dict[str, list[torch.Tensor]]] = {}
     for layer_name, lora_weights in list(lora_layers.items()):
         if "single_transformer_blocks" in layer_name:
-            # Check if this is a split QKV
+            # Check if this is a split QKV - use endswith to avoid substring issues
             for qkv_type in ["attn.to_q", "attn.to_k", "attn.to_v"]:
-                if qkv_type in layer_name:
+                if layer_name.endswith(qkv_type):
                     # Get base layer name (block.attn.to_qkv)
-                    base_name = layer_name.replace(qkv_type, "attn.to_qkv")
+                    base_name = layer_name[: -len(qkv_type)] + "attn.to_qkv"
                     if base_name not in fused_qkv:
                         fused_qkv[base_name] = {"lora_A": [], "lora_B": []}
 
@@ -230,10 +230,31 @@ def convert_chroma_lora_to_nunchaku(
         orig_down = unpack_lowrank_weight(orig_down_packed, down=True)
         orig_up = unpack_lowrank_weight(orig_up_packed, down=False)
 
+        # Validate dimension compatibility
+        # lora_A: [lora_rank, in_features], orig_down: [rank, in_features]
+        # lora_B: [out_features, lora_rank], orig_up: [out_features, rank]
+        if lora_A.shape[1] != orig_down.shape[1]:
+            logger.warning(
+                f"Dimension mismatch for {model_layer}: "
+                f"LoRA lora_A has in_features={lora_A.shape[1]}, "
+                f"model proj_down has in_features={orig_down.shape[1]}. Skipping layer."
+            )
+            continue
+
+        if lora_B.shape[0] != orig_up.shape[0]:
+            logger.warning(
+                f"Dimension mismatch for {model_layer}: "
+                f"LoRA lora_B has out_features={lora_B.shape[0]}, "
+                f"model proj_up has out_features={orig_up.shape[0]}. Skipping layer."
+            )
+            continue
+
         # Merge LoRA with SVD branch
         new_down, new_up = merge_lora_with_svd_branch(orig_down, orig_up, lora_A, lora_B, strength)
 
-        # Pad to multiple of 16 (required for CUDA kernels)
+        # Pad rank to multiple of 16 (required for CUDA kernels)
+        # new_down: [rank + lora_rank, in_features], pad dim=0 (rank dimension)
+        # new_up: [out_features, rank + lora_rank], pad dim=1 (rank dimension)
         new_rank = new_down.shape[0]
         if new_rank % 16 != 0:
             new_down = pad(new_down, divisor=16, dim=0)

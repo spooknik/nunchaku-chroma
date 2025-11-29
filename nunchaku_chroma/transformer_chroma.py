@@ -3,10 +3,12 @@ This module provides Nunchaku ChromaTransformer2DModel and its building blocks i
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.transformers.transformer_chroma import (
@@ -16,6 +18,7 @@ from diffusers.models.transformers.transformer_chroma import (
 )
 from diffusers.models.transformers.transformer_flux import FluxAttention
 from huggingface_hub import utils
+from torch import nn
 from torch.nn import GELU
 
 from nunchaku.ops.fused import fused_gelu_mlp
@@ -500,8 +503,17 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
             if hasattr(block, 'attn') and hasattr(block.attn, 'set_processor'):
                 block.attn.set_processor(impl)
 
-    def _init_lora_state(self):
-        """Initialize LoRA tracking state if not already done."""
+    def _init_lora_state(self, store_originals: bool = True):
+        """
+        Initialize LoRA tracking state if not already done.
+
+        Parameters
+        ----------
+        store_originals : bool, optional
+            Whether to store original SVD weights for reset capability.
+            Set to False to save memory if you don't need reset_lora() or
+            set_lora_strength(). Default is True.
+        """
         if not hasattr(self, '_original_in_channels'):
             self._original_in_channels = self.config.in_channels
 
@@ -511,15 +523,18 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
         if not hasattr(self, 'comfy_lora_sd_list'):
             self.comfy_lora_sd_list = []
 
-        # Store original SVD weights for reset
+        # Store original SVD weights for reset (only if requested and not already stored)
         if not hasattr(self, '_original_svd_weights'):
+            self._original_svd_weights = None
+
+        if store_originals and self._original_svd_weights is None:
             self._original_svd_weights = {}
             for name, module in self.named_modules():
                 if isinstance(module, SVDQW4A4Linear):
                     self._original_svd_weights[f"{name}.proj_down"] = module.proj_down.data.clone()
                     self._original_svd_weights[f"{name}.proj_up"] = module.proj_up.data.clone()
 
-    def update_lora_params(self, state_dict: dict[str, torch.Tensor]):
+    def update_lora_params(self, lora: str | dict[str, torch.Tensor], strength: float = 1.0, store_originals: bool = True):
         """
         Update the model with new LoRA parameters.
 
@@ -529,21 +544,42 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
 
         Parameters
         ----------
-        state_dict : dict[str, torch.Tensor]
-            State dict containing LoRA weights. Keys should be in the format:
-            ``"layer_name.lora_A.weight"`` and ``"layer_name.lora_B.weight"``.
-        """
-        import logging
+        lora : str or dict[str, torch.Tensor]
+            Either a path to a safetensors file, or a state dict containing LoRA weights.
+            Keys should be in the format: ``"layer_name.lora_A.weight"`` and
+            ``"layer_name.lora_B.weight"``.
+        strength : float, optional
+            LoRA strength multiplier. Default is 1.0.
+        store_originals : bool, optional
+            Whether to store original SVD weights for reset capability.
+            Set to False to save memory if you don't need ``reset_lora()`` or
+            ``set_lora_strength()``. Default is True.
 
-        from ...lora.chroma.nunchaku_converter import convert_chroma_lora_to_nunchaku
+        Notes
+        -----
+        Setting ``store_originals=False`` saves approximately 200-400MB of GPU memory
+        but disables the ability to reset or adjust LoRA strength after application.
+        """
+        from nunchaku.lora.chroma.diffusers_converter import to_diffusers
+        from nunchaku.lora.chroma.nunchaku_converter import convert_chroma_lora_to_nunchaku
 
         logger = logging.getLogger(__name__)
-        self._init_lora_state()
+        self._init_lora_state(store_originals=store_originals)
+
+        # Handle file path input
+        if isinstance(lora, str):
+            state_dict = to_diffusers(lora)
+        else:
+            state_dict = lora
+
+        # Store for dynamic strength adjustment
+        self._current_lora_dict = state_dict
+        self._current_strength = strength
 
         # First reset to original weights
         self._restore_original_weights()
 
-        # Get current model state dict
+        # Get current model state dict (after reset to original)
         model_state_dict = {}
         for name, module in self.named_modules():
             if isinstance(module, SVDQW4A4Linear):
@@ -552,7 +588,7 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
 
         # Convert and merge LoRA
         try:
-            updated_weights = convert_chroma_lora_to_nunchaku(state_dict, model_state_dict, strength=1.0)
+            updated_weights = convert_chroma_lora_to_nunchaku(state_dict, model_state_dict, strength=strength)
 
             # Apply updated weights
             for key, value in updated_weights.items():
@@ -578,8 +614,8 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
 
     def _restore_original_weights(self):
         """Restore original SVD weights before applying new LoRA."""
-        if not hasattr(self, '_original_svd_weights'):
-            return
+        if not hasattr(self, '_original_svd_weights') or self._original_svd_weights is None:
+            return False
 
         for key, value in self._original_svd_weights.items():
             parts = key.rsplit(".", 1)
@@ -596,19 +632,58 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
                     param = getattr(module, param_name)
                     param.data = value.clone().to(param.device, param.dtype)
 
+        return True
+
+    def set_lora_strength(self, strength: float = 1.0):
+        """
+        Adjust LoRA strength without reloading from disk.
+
+        This re-merges the currently loaded LoRA with a new strength value.
+        Requires that a LoRA has already been applied via ``update_lora_params()``
+        with ``store_originals=True``.
+
+        Parameters
+        ----------
+        strength : float, optional
+            New LoRA strength multiplier. Default is 1.0.
+        """
+        logger = logging.getLogger(__name__)
+
+        if not hasattr(self, '_original_svd_weights') or self._original_svd_weights is None:
+            logger.warning(
+                "Cannot adjust LoRA strength: original weights not stored. "
+                "Use update_lora_params(..., store_originals=True) to enable this feature."
+            )
+            return
+
+        if not hasattr(self, '_current_lora_dict') or self._current_lora_dict is None:
+            logger.warning("No LoRA currently loaded. Call update_lora_params() first.")
+            return
+
+        # Re-apply with new strength
+        self.update_lora_params(self._current_lora_dict, strength=strength)
+
     def reset_lora(self):
         """
         Reset all LoRA parameters to their default state.
 
         This restores the original SVD weights that were saved when the model
-        was first loaded.
+        was first loaded. Requires that LoRA was applied with ``store_originals=True``.
         """
-        import logging
-
         logger = logging.getLogger(__name__)
-        self._init_lora_state()
+        self._init_lora_state(store_originals=False)  # Don't create originals if they don't exist
 
-        self._restore_original_weights()
+        if not self._restore_original_weights():
+            logger.warning(
+                "Cannot reset LoRA: original weights not stored. "
+                "Use update_lora_params(..., store_originals=True) to enable reset."
+            )
+            return
+
+        # Clear stored LoRA state
+        self._current_lora_dict = None
+        self._current_strength = None
+
         logger.info("Reset Chroma model to original SVD weights (LoRA removed)")
 
     def reset_x_embedder(self):
@@ -618,6 +693,47 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
         self._init_lora_state()
         # For Chroma, x_embedder is typically not modified by LoRA
         pass
+
+    def update_lora_params_multi(self, loras: list[tuple[str | dict[str, torch.Tensor], float]]):
+        """
+        Update the model with multiple composed LoRA parameters.
+
+        This method composes multiple LoRAs with their respective strengths into a single
+        LoRA representation, then applies it to the model.
+
+        Parameters
+        ----------
+        loras : list of tuple
+            List of (lora, strength) tuples where:
+            - lora: Either a path to a safetensors file or a LoRA state dict
+            - strength: Float strength/scale factor for that LoRA
+
+        Examples
+        --------
+        >>> model.update_lora_params_multi([
+        ...     ("lora1.safetensors", 0.8),
+        ...     ("lora2.safetensors", 0.5),
+        ... ])
+        """
+        from nunchaku.lora.chroma.compose import compose_lora
+
+        logger = logging.getLogger(__name__)
+
+        if len(loras) == 0:
+            self.reset_lora()
+            return
+
+        # Compose all LoRAs into one
+        composed_lora = compose_lora(loras)
+
+        # Store for reference (use composed result with effective strength=1.0)
+        self._current_lora_list = loras
+
+        # Apply the composed LoRA with strength=1.0 (strengths already baked in)
+        self.update_lora_params(composed_lora, strength=1.0)
+
+        lora_info = ", ".join([f"{l[0] if isinstance(l[0], str) else 'dict'}@{l[1]}" for l in loras])
+        logger.info(f"Applied {len(loras)} composed Chroma LoRAs: {lora_info}")
 
     def forward(
         self,
@@ -730,8 +846,6 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
 
             # Controlnet residual
             if controlnet_block_samples is not None:
-                import numpy as np
-
                 interval_control = len(self.transformer_blocks) / len(controlnet_block_samples)
                 interval_control = int(np.ceil(interval_control))
                 if controlnet_blocks_repeat:
@@ -758,8 +872,6 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
 
             # Controlnet residual
             if controlnet_single_block_samples is not None:
-                import numpy as np
-
                 interval_control = len(self.single_transformer_blocks) / len(controlnet_single_block_samples)
                 interval_control = int(np.ceil(interval_control))
                 hidden_states[:, encoder_hidden_states.shape[1] :, ...] = (

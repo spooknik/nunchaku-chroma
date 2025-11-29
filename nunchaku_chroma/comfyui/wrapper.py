@@ -7,19 +7,20 @@ import torch
 from einops import rearrange, repeat
 from torch import nn
 
-from nunchaku.lora.flux.compose import compose_lora
-
-# Import Chroma LoRA converter - try multiple import paths for flexibility
+# Import Chroma LoRA converter and compose function - try multiple import paths for flexibility
 try:
     # When installed as part of nunchaku-chroma package
     from ..lora.diffusers_converter import to_diffusers as chroma_to_diffusers
+    from ..lora.compose import compose_lora
 except ImportError:
     try:
         # When installed to ComfyUI-nunchaku wrappers directory
         from .lora.diffusers_converter import to_diffusers as chroma_to_diffusers
+        from .lora.compose import compose_lora
     except ImportError:
         # Fallback to nunchaku's chroma LoRA converter
         from nunchaku.lora.chroma.diffusers_converter import to_diffusers as chroma_to_diffusers
+        from nunchaku.lora.chroma.compose import compose_lora
 
 
 class ComfyChromaWrapper(nn.Module):

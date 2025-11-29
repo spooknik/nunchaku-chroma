@@ -191,6 +191,143 @@ def handle_comfyui_chroma_lora(state_dict: dict[str, torch.Tensor]) -> dict[str,
     return new_state_dict
 
 
+def handle_bfl_chroma_lora(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """
+    Convert BFL/ComfyUI native Chroma LoRA format to diffusers format.
+
+    This format uses keys like:
+    - diffusion_model.double_blocks.0.img_attn.proj.lora_A.weight
+    - diffusion_model.single_blocks.0.linear1.lora_A.weight
+
+    This converts to diffusers-style keys:
+    - transformer_blocks.0.attn.to_out.0.lora_A.weight
+    - single_transformer_blocks.0.proj_mlp.lora_A.weight
+
+    Parameters
+    ----------
+    state_dict : dict[str, torch.Tensor]
+        LoRA weights in BFL/native format.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        LoRA weights in diffusers format.
+    """
+    new_state_dict = {}
+
+    # Check if this is BFL format
+    if not any(k.startswith("diffusion_model.") for k in state_dict.keys()):
+        return state_dict
+
+    logger.debug("Converting BFL/native Chroma LoRA format to diffusers format")
+
+    # Mapping from BFL layer names to diffusers layer names
+    double_block_map = {
+        "img_attn.proj": "attn.to_out.0",
+        "img_attn.qkv": "attn.to_qkv",
+        "img_mlp.0": "ff.net.0.proj",
+        "img_mlp.2": "ff.net.2",
+        "txt_attn.proj": "attn.to_add_out",
+        "txt_attn.qkv": "attn.add_qkv_proj",
+        "txt_mlp.0": "ff_context.net.0.proj",
+        "txt_mlp.2": "ff_context.net.2",
+    }
+
+    for key, value in state_dict.items():
+        # Skip non-LoRA keys
+        if ".lora_A." not in key and ".lora_B." not in key:
+            continue
+
+        new_key = key
+
+        # Handle double blocks: diffusion_model.double_blocks.0.img_attn.proj.lora_A.weight
+        match = re.match(r"diffusion_model\.double_blocks\.(\d+)\.([^.]+\.[^.]+)\.(lora_[AB])\.weight", key)
+        if match:
+            block_idx = match.group(1)
+            layer_name = match.group(2)  # e.g., "img_attn.proj"
+            lora_type = match.group(3)  # lora_A or lora_B
+
+            if layer_name in double_block_map:
+                diffusers_layer = double_block_map[layer_name]
+                new_key = f"transformer_blocks.{block_idx}.{diffusers_layer}.{lora_type}.weight"
+                new_state_dict[new_key] = value
+                continue
+
+        # Handle single blocks: diffusion_model.single_blocks.0.linear1.lora_A.weight
+        match = re.match(r"diffusion_model\.single_blocks\.(\d+)\.([^.]+)\.(lora_[AB])\.weight", key)
+        if match:
+            block_idx = match.group(1)
+            layer_name = match.group(2)  # e.g., "linear1" or "linear2"
+            lora_type = match.group(3)  # lora_A or lora_B
+
+            if layer_name == "linear1":
+                # linear1 is fused: first part is QKV (split to Q, K, V), second part is mlp_fc1
+                if lora_type == "lora_A":
+                    # lora_A has shape [rank, in_features]
+                    # For Chroma: QKV part is 3072*3=9216, MLP part is 12288, total 21504
+                    # But we need to check the actual shape
+                    if value.shape[1] == 21504:  # Full fused format
+                        qkv_value = value[:, :9216].clone()
+                        mlp_value = value[:, 9216:].clone()
+
+                        # Split QKV into Q, K, V (each 3072)
+                        q_value = qkv_value[:, :3072].clone()
+                        k_value = qkv_value[:, 3072:6144].clone()
+                        v_value = qkv_value[:, 6144:].clone()
+
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.attn.to_q.{lora_type}.weight"] = q_value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.attn.to_k.{lora_type}.weight"] = k_value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.attn.to_v.{lora_type}.weight"] = v_value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_mlp.{lora_type}.weight"] = mlp_value
+                    else:
+                        # Just store as proj_mlp if dimensions don't match expected fused format
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_mlp.{lora_type}.weight"] = value
+                else:
+                    # lora_B has shape [out_features, rank]
+                    # For fused, out is 21504 (9216 QKV + 12288 MLP)
+                    if value.shape[0] == 21504:
+                        qkv_value = value[:9216, :].clone()
+                        mlp_value = value[9216:, :].clone()
+
+                        # Split QKV into Q, K, V
+                        q_value = qkv_value[:3072, :].clone()
+                        k_value = qkv_value[3072:6144, :].clone()
+                        v_value = qkv_value[6144:, :].clone()
+
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.attn.to_q.{lora_type}.weight"] = q_value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.attn.to_k.{lora_type}.weight"] = k_value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.attn.to_v.{lora_type}.weight"] = v_value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_mlp.{lora_type}.weight"] = mlp_value
+                    else:
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_mlp.{lora_type}.weight"] = value
+                continue
+
+            elif layer_name == "linear2":
+                # linear2 is fused: first part is attn_out (3072), second is mlp_fc2 (12288)
+                if lora_type == "lora_A":
+                    # lora_A: [rank, in_features] where in_features = 3072 + 12288 = 15360
+                    if value.shape[1] == 15360:
+                        attn_value = value[:, :3072].clone()
+                        mlp_value = value[:, 3072:].clone()
+
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_out.linears.0.{lora_type}.weight"] = attn_value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_out.linears.1.{lora_type}.weight"] = mlp_value
+                    else:
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_out.linears.0.{lora_type}.weight"] = value
+                        new_state_dict[f"single_transformer_blocks.{block_idx}.proj_out.linears.1.{lora_type}.weight"] = value
+                else:
+                    # lora_B: [out_features, rank] - shared for both outputs
+                    new_state_dict[f"single_transformer_blocks.{block_idx}.proj_out.linears.0.{lora_type}.weight"] = value
+                    new_state_dict[f"single_transformer_blocks.{block_idx}.proj_out.linears.1.{lora_type}.weight"] = value
+                continue
+
+        # If no pattern matched, keep original key
+        if new_key not in new_state_dict:
+            new_state_dict[new_key] = value
+
+    return new_state_dict
+
+
 def to_diffusers(input_lora: str | dict[str, torch.Tensor], output_path: str | None = None) -> dict[str, torch.Tensor]:
     """
     Convert Chroma LoRA weights to an intermediate diffusers-like format.
@@ -219,9 +356,15 @@ def to_diffusers(input_lora: str | dict[str, torch.Tensor], output_path: str | N
         if v.dtype not in [torch.float64, torch.float32, torch.bfloat16, torch.float16]:
             tensors[k] = v.to(torch.bfloat16)
 
+    # Check if already in diffusers format - return as-is
+    if any(k.startswith("transformer_blocks.") or k.startswith("single_transformer_blocks.") for k in tensors.keys()):
+        new_tensors = tensors
     # Handle ComfyUI/Kohya format (lora_unet_*)
-    if any(k.startswith("lora_unet_") for k in tensors.keys()):
+    elif any(k.startswith("lora_unet_") for k in tensors.keys()):
         new_tensors = handle_comfyui_chroma_lora(tensors)
+    # Handle BFL/native format (diffusion_model.*)
+    elif any(k.startswith("diffusion_model.") for k in tensors.keys()):
+        new_tensors = handle_bfl_chroma_lora(tensors)
     else:
         # Try using FLUX's conversion logic as fallback
         try:

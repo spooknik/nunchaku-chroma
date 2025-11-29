@@ -107,21 +107,61 @@ After installing:
 
 ## LoRA Support
 
-Chroma LoRAs are fully supported with automatic format conversion.
+Chroma LoRAs are fully supported with automatic format conversion and strength control.
 
 ### In ComfyUI
 
 1. Place your Chroma LoRA files in `ComfyUI/models/loras/`
 2. Use the **"Nunchaku Chroma LoRA Loader"** node after the model loader
-3. You can chain multiple LoRA nodes, or use **"Nunchaku Chroma LoRA Stack"** for multiple LoRAs in one node
+3. Adjust the **strength** slider (0.0 to 2.0) to control LoRA intensity
+4. You can chain multiple LoRA nodes, or use **"Nunchaku Chroma LoRA Stack"** for multiple LoRAs in one node
+
+### Diffusers API
+
+```python
+from nunchaku import NunchakuChromaTransformer2DModel
+
+# Load quantized model
+transformer = NunchakuChromaTransformer2DModel.from_pretrained(
+    "path/to/quantized-chroma.safetensors",
+    torch_dtype=torch.bfloat16,
+)
+
+# Apply single LoRA with strength
+transformer.update_lora_params("path/to/lora.safetensors", strength=0.8)
+
+# Adjust strength dynamically (without reloading)
+transformer.set_lora_strength(0.5)
+
+# Reset to base model
+transformer.reset_lora()
+
+# Apply multiple LoRAs with different strengths
+transformer.update_lora_params_multi([
+    ("lora1.safetensors", 0.8),
+    ("lora2.safetensors", 0.5),
+])
+```
+
+### Composing Multiple LoRAs
+
+You can pre-compose multiple LoRAs into a single file:
+
+```bash
+python -m nunchaku.lora.chroma.compose \
+    -i lora1.safetensors lora2.safetensors \
+    -s 0.8 0.5 \
+    -o composed_lora.safetensors
+```
 
 ### How LoRA Works
 
 The LoRA implementation:
 
 1. **Converts** ComfyUI/Kohya format (`lora_unet_double_blocks_*`) to diffusers format
-2. **Merges** LoRA weights with the existing SVD low-rank branch by concatenation
-3. **Preserves** the original quantization compensation while adding the LoRA effect
+2. **Applies strength** by scaling the LoRA weights before merging
+3. **Merges** LoRA weights with the existing SVD low-rank branch by concatenation
+4. **Preserves** the original quantization compensation while adding the LoRA effect
 
 This approach is different from standard LoRA application - instead of adding LoRA as a separate computation, we concatenate the LoRA weights with the existing SVD decomposition weights. This maintains inference speed while supporting LoRA effects.
 
@@ -137,31 +177,45 @@ The installer adds the following files:
 | Location | File | Purpose |
 |----------|------|---------|
 | nunchaku | `models/transformers/transformer_chroma.py` | Core Chroma transformer with LoRA support |
+| nunchaku | `lora/chroma/__init__.py` | Module exports |
 | nunchaku | `lora/chroma/diffusers_converter.py` | Converts ComfyUI LoRA format to diffusers |
 | nunchaku | `lora/chroma/nunchaku_converter.py` | Merges LoRA with SVD branch |
+| nunchaku | `lora/chroma/compose.py` | Multi-LoRA composition utility |
 | ComfyUI-nunchaku | `wrappers/chroma.py` | Latent format adapter (16ch ↔ 64ch) |
 | ComfyUI-nunchaku | `wrappers/lora/` | LoRA converter copies for wrapper imports |
 | ComfyUI-nunchaku | `nodes/models/chroma.py` | Model loader node |
 | ComfyUI-nunchaku | `nodes/lora/chroma.py` | LoRA loader nodes |
 
-## Folder Structure:
+## Troubleshooting
 
-```
-nunchaku-chroma/
-├── install.py                    # Installer script
-├── nunchaku_chroma/
-│   ├── __init__.py
-│   ├── transformer_chroma.py     # Main transformer with LoRA support
-│   ├── patcher.py
-│   ├── lora/
-│   │   ├── __init__.py
-│   │   ├── diffusers_converter.py   # Converts ComfyUI LoRA → diffusers format
-│   │   └── nunchaku_converter.py    # Merges LoRA with SVD branch
-│   └── comfyui/
-│       ├── __init__.py
-│       ├── wrapper.py            # ComfyUI wrapper with LoRA loading
-│       ├── loader.py             # DiT loader node
-│       └── lora.py               # LoRA loader nodes
+### "mat1 and mat2 shapes cannot be multiplied"
+
+This usually means latent packing is not working correctly. Make sure you're using the ComfyUI wrapper which handles the conversion between 16-channel and 64-channel formats.
+
+### "missing required positional argument 'y'"
+
+The wrapper's forward method needs `y=None` and `guidance=None` as optional keyword arguments. This is handled in the included wrapper.
+
+### "No module named 'nunchaku.lora.chroma'"
+
+The LoRA converter files weren't installed. Re-run the installer:
+
+```bash
+python install.py C:\ComfyUI
 ```
 
+### Node doesn't appear in ComfyUI
 
+1. Make sure nunchaku has Chroma support: `python -m nunchaku_chroma.patcher --verify`
+2. Make sure ComfyUI-nunchaku was patched: Check for `wrappers/chroma.py` and `nodes/models/chroma.py`
+3. Restart ComfyUI after patching
+
+### LoRA has no effect
+
+1. Check that the LoRA format is supported (ComfyUI/Kohya or diffusers format)
+2. Verify the LoRA was trained for Chroma (not FLUX - they have different architectures)
+3. Check ComfyUI logs for any conversion warnings
+
+## License
+
+MIT License
