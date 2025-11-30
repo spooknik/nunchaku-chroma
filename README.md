@@ -8,6 +8,10 @@ Since Chroma reuses FLUX's CUDA kernels, **no recompilation is needed** - only P
 
 ## Installation
 
+WiP
+
+Download this repo and run `manual-install.py`
+
 ### Prerequisites
 
 - Python 3.10+
@@ -15,17 +19,6 @@ Since Chroma reuses FLUX's CUDA kernels, **no recompilation is needed** - only P
 - A quantized Chroma model (`.safetensors` file)
 
 ### Quick Install (ComfyUI)
-
-The simplest way to install is using the standalone installer:
-
-```bash
-git clone https://github.com/your-username/nunchaku-chroma.git
-cd nunchaku-chroma
-python install.py C:\ComfyUI   # Windows
-python install.py ~/ComfyUI    # Linux/Mac
-```
-
-Or with auto-detection:
 
 ```bash
 python install.py --auto-detect
@@ -180,6 +173,7 @@ The installer adds the following files:
 | ComfyUI-nunchaku | `wrappers/lora/` | LoRA converter copies for wrapper imports |
 | ComfyUI-nunchaku | `nodes/models/chroma.py` | Model loader node |
 | ComfyUI-nunchaku | `nodes/lora/chroma.py` | LoRA loader nodes |
+
 
 
 
