@@ -4,12 +4,7 @@ Adds [Chroma](https://github.com/lodestones/Chroma) model support to [Nunchaku](
 
 ## Overview
 
-Chroma is a FLUX-based diffusion model that requires specific handling:
-- Uses **packed latents** (64 channels) instead of unpacked (16 channels)
-- Uses `patch_size=1` instead of FLUX's `patch_size=2`
-- Architecture: 19 double transformer blocks + 38 single transformer blocks
-
-Since Chroma reuses FLUX's CUDA kernels, **no recompilation is needed** - only Python files need to be added to your existing nunchaku installation.
+Since Chroma reuses FLUX's CUDA kernels, **no recompilation is needed** - only Python files need to be added to your existing nunchaku installation. 
 
 ## Installation
 
@@ -186,36 +181,5 @@ The installer adds the following files:
 | ComfyUI-nunchaku | `nodes/models/chroma.py` | Model loader node |
 | ComfyUI-nunchaku | `nodes/lora/chroma.py` | LoRA loader nodes |
 
-## Troubleshooting
 
-### "mat1 and mat2 shapes cannot be multiplied"
 
-This usually means latent packing is not working correctly. Make sure you're using the ComfyUI wrapper which handles the conversion between 16-channel and 64-channel formats.
-
-### "missing required positional argument 'y'"
-
-The wrapper's forward method needs `y=None` and `guidance=None` as optional keyword arguments. This is handled in the included wrapper.
-
-### "No module named 'nunchaku.lora.chroma'"
-
-The LoRA converter files weren't installed. Re-run the installer:
-
-```bash
-python install.py C:\ComfyUI
-```
-
-### Node doesn't appear in ComfyUI
-
-1. Make sure nunchaku has Chroma support: `python -m nunchaku_chroma.patcher --verify`
-2. Make sure ComfyUI-nunchaku was patched: Check for `wrappers/chroma.py` and `nodes/models/chroma.py`
-3. Restart ComfyUI after patching
-
-### LoRA has no effect
-
-1. Check that the LoRA format is supported (ComfyUI/Kohya or diffusers format)
-2. Verify the LoRA was trained for Chroma (not FLUX - they have different architectures)
-3. Check ComfyUI logs for any conversion warnings
-
-## License
-
-MIT License
