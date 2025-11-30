@@ -7,10 +7,12 @@ Works on both Windows and Linux.
 
 Usage:
     python manual_install.py /path/to/ComfyUI
+    python manual_install.py --nunchaku-path /path/to/site-packages/nunchaku /path/to/ComfyUI
 
 Example:
     Windows: python manual_install.py C:\\ComfyUI
     Linux:   python manual_install.py ~/ComfyUI
+    Docker:  python manual_install.py --nunchaku-path /usr/local/lib64/python3.12/site-packages/nunchaku /root/ComfyUI
 """
 
 import argparse
@@ -37,6 +39,7 @@ def get_common_comfyui_paths():
         ]
     else:  # Linux/Mac
         return [
+            Path("/root/ComfyUI"),
             home / "ComfyUI",
             home / "comfyui",
             Path("/opt/ComfyUI"),
@@ -92,6 +95,15 @@ def find_site_packages(venv_path: Path) -> Path | None:
     return None
 
 
+def find_system_nunchaku() -> Path | None:
+    """Find nunchaku in system Python installation."""
+    try:
+        import nunchaku
+        return Path(nunchaku.__file__).parent
+    except ImportError:
+        return None
+
+
 def find_nunchaku_in_venv(site_packages: Path) -> Path | None:
     """Find the nunchaku package in site-packages."""
     nunchaku_path = site_packages / "nunchaku"
@@ -119,8 +131,78 @@ def get_source_dir() -> Path:
     return Path(__file__).parent / "nunchaku_chroma"
 
 
+def patch_multiline_import(init_path: Path, from_module: str, class_name: str, dry_run: bool = False) -> bool:
+    """
+    Patch an __init__.py that uses multi-line imports like:
+        from .module import (
+            ClassA,
+            ClassB,
+        )
+
+    Adds class_name to the import list from the specified module.
+    """
+    import re
+
+    if not init_path.exists():
+        print(f"  [?] Warning: {init_path.name} not found")
+        return False
+
+    content = init_path.read_text()
+
+    # Check if already present
+    if class_name in content:
+        print(f"  [.] {class_name} already in {init_path.name}")
+        return True
+
+    # Find the multi-line import from the specified module
+    pattern = rf'(from \.{re.escape(from_module)} import \()([^)]*?)(\))'
+    match = re.search(pattern, content, re.DOTALL)
+
+    if not match:
+        # Try single-line import pattern
+        single_pattern = rf'from \.{re.escape(from_module)} import ([^\n(]+)'
+        single_match = re.search(single_pattern, content)
+        if single_match:
+            # Convert to include our class
+            old_imports = single_match.group(1).strip()
+            new_line = f"from .{from_module} import (\n    {class_name},\n    {old_imports},\n)"
+            content = content[:single_match.start()] + new_line + content[single_match.end():]
+        else:
+            print(f"  [?] Warning: Could not find import from .{from_module} in {init_path.name}")
+            return False
+    else:
+        # Add to existing multi-line import
+        existing_imports = match.group(2)
+        # Add the new class at the beginning
+        new_imports = f"\n    {class_name}," + existing_imports
+        content = content[:match.start()] + match.group(1) + new_imports + match.group(3) + content[match.end():]
+
+    # Also add to __all__ if present
+    if "__all__" in content:
+        all_pattern = r'(__all__\s*=\s*\[)([^\]]*?)(\])'
+        all_match = re.search(all_pattern, content, re.DOTALL)
+        if all_match and class_name not in all_match.group(2):
+            existing_all = all_match.group(2)
+            new_all = f'\n    "{class_name}",' + existing_all
+            content = content[:all_match.start()] + all_match.group(1) + new_all + all_match.group(3) + content[all_match.end():]
+
+    if dry_run:
+        print(f"  Would modify: {init_path.name}")
+    else:
+        # Backup
+        backup = init_path.with_suffix('.py.bak')
+        if not backup.exists():
+            shutil.copy(init_path, backup)
+        init_path.write_text(content)
+        print(f"  [+] Modified: {init_path.name}")
+
+    return True
+
+
 def install_to_nunchaku(nunchaku_path: Path, source_dir: Path, dry_run: bool = False) -> bool:
     """Install Chroma transformer and LoRA converter to nunchaku package."""
+    import re
+
     print(f"\n[*] Installing to nunchaku: {nunchaku_path}")
 
     # Copy transformer_chroma.py
@@ -166,28 +248,14 @@ def install_to_nunchaku(nunchaku_path: Path, source_dir: Path, dry_run: bool = F
                 print(f"  [+] Copied: {dst_rel}")
 
     # Patch __init__.py files
-    init_files = [
-        (nunchaku_path / "models" / "transformers" / "__init__.py",
-         "from .transformer_chroma import NunchakuChromaTransformer2DModel",
-         "NunchakuChromaTransformer2DModel"),
-        (nunchaku_path / "models" / "__init__.py",
-         None,  # No new import needed, just add to __all__
-         "NunchakuChromaTransformer2DModel"),
-        (nunchaku_path / "__init__.py",
-         None,
-         "NunchakuChromaTransformer2DModel"),
-    ]
+    class_name = "NunchakuChromaTransformer2DModel"
 
-    for init_path, import_line, export_name in init_files:
-        if not init_path.exists():
-            print(f"  [?] Warning: {init_path.name} not found")
-            continue
-
-        content = init_path.read_text()
-        modified = False
-
-        # Add import if specified and not present
-        if import_line and import_line not in content:
+    # 1. Patch models/transformers/__init__.py - add direct import
+    transformers_init = nunchaku_path / "models" / "transformers" / "__init__.py"
+    if transformers_init.exists():
+        content = transformers_init.read_text()
+        if class_name not in content:
+            import_line = f"from .transformer_chroma import {class_name}"
             # Add after other imports
             lines = content.split('\n')
             insert_idx = 0
@@ -196,31 +264,33 @@ def install_to_nunchaku(nunchaku_path: Path, source_dir: Path, dry_run: bool = F
                     insert_idx = i + 1
             lines.insert(insert_idx, import_line)
             content = '\n'.join(lines)
-            modified = True
 
-        # Add to __all__ if not present
-        if export_name and export_name not in content and "__all__" in content:
-            # Find __all__ and add the export
-            import re
-            all_match = re.search(r'(__all__\s*=\s*\[)([^\]]*)', content)
-            if all_match:
-                existing = all_match.group(2)
-                if not existing.strip().endswith(','):
-                    existing = existing.rstrip() + ','
-                new_all = all_match.group(1) + f'\n    "{export_name}",' + existing
-                content = content[:all_match.start()] + new_all + content[all_match.end():]
-                modified = True
+            # Add to __all__
+            if "__all__" in content:
+                all_match = re.search(r'(__all__\s*=\s*\[)([^\]]*)', content)
+                if all_match and class_name not in all_match.group(2):
+                    existing = all_match.group(2)
+                    if not existing.strip().endswith(','):
+                        existing = existing.rstrip() + ','
+                    new_all = all_match.group(1) + f'\n    "{class_name}",' + existing
+                    content = content[:all_match.start()] + new_all + content[all_match.end():]
 
-        if modified:
             if dry_run:
-                print(f"  Would modify: {init_path.name}")
+                print(f"  Would modify: models/transformers/__init__.py")
             else:
-                # Backup
-                backup = init_path.with_suffix('.py.bak')
+                backup = transformers_init.with_suffix('.py.bak')
                 if not backup.exists():
-                    shutil.copy(init_path, backup)
-                init_path.write_text(content)
-                print(f"  [+] Modified: {init_path.name}")
+                    shutil.copy(transformers_init, backup)
+                transformers_init.write_text(content)
+                print(f"  [+] Modified: models/transformers/__init__.py")
+
+    # 2. Patch models/__init__.py - add to multi-line import from .transformers
+    models_init = nunchaku_path / "models" / "__init__.py"
+    patch_multiline_import(models_init, "transformers", class_name, dry_run=dry_run)
+
+    # 3. Patch nunchaku/__init__.py - add to multi-line import from .models
+    root_init = nunchaku_path / "__init__.py"
+    patch_multiline_import(root_init, "models", class_name, dry_run=dry_run)
 
     return True
 
@@ -358,9 +428,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    Windows:  python install.py C:\\ComfyUI
-    Linux:    python install.py ~/ComfyUI
-    Dry run:  python install.py --dry-run /path/to/ComfyUI
+    Windows:  python manual_install.py C:\\ComfyUI
+    Linux:    python manual_install.py ~/ComfyUI
+    Docker:   python manual_install.py --nunchaku-path /usr/local/lib64/python3.12/site-packages/nunchaku /root/ComfyUI
+    Dry run:  python manual_install.py --dry-run /path/to/ComfyUI
 """
     )
     parser.add_argument(
@@ -377,6 +448,11 @@ Examples:
         "--auto-detect",
         action="store_true",
         help="Try to auto-detect ComfyUI installation"
+    )
+    parser.add_argument(
+        "--nunchaku-path",
+        type=str,
+        help="Path to nunchaku package (for system-wide Python installations)"
     )
 
     args = parser.parse_args()
@@ -402,9 +478,9 @@ Examples:
     if comfyui_path is None:
         print("\n[!] ComfyUI path not specified.")
         print("\nUsage:")
-        print("  python install.py /path/to/ComfyUI")
+        print("  python manual_install.py /path/to/ComfyUI")
         print("\nOr use --auto-detect to search common locations:")
-        print("  python install.py --auto-detect")
+        print("  python manual_install.py --auto-detect")
         sys.exit(1)
 
     if not comfyui_path.exists():
@@ -413,30 +489,41 @@ Examples:
 
     print(f"\n[*] ComfyUI path: {comfyui_path}")
 
-    # Find venv and site-packages
-    venv_path = find_comfyui_venv(comfyui_path)
-    if venv_path is None:
-        print("\n[!] Could not find ComfyUI's Python environment")
-        print("  Looked for: .venv, venv, python_embeded")
-        sys.exit(1)
+    # Find nunchaku - try multiple methods
+    nunchaku_path = None
 
-    print(f"  Venv: {venv_path}")
+    # Method 1: Explicit path provided
+    if args.nunchaku_path:
+        nunchaku_path = Path(args.nunchaku_path).expanduser().resolve()
+        if not nunchaku_path.exists():
+            print(f"\n[!] Specified nunchaku path does not exist: {nunchaku_path}")
+            sys.exit(1)
+        print(f"  Nunchaku (explicit): {nunchaku_path}")
+    else:
+        # Method 2: Look in ComfyUI's venv
+        venv_path = find_comfyui_venv(comfyui_path)
+        if venv_path:
+            print(f"  Venv: {venv_path}")
+            site_packages = find_site_packages(venv_path)
+            if site_packages:
+                print(f"  Site-packages: {site_packages}")
+                nunchaku_path = find_nunchaku_in_venv(site_packages)
+                if nunchaku_path:
+                    print(f"  Nunchaku (venv): {nunchaku_path}")
 
-    site_packages = find_site_packages(venv_path)
-    if site_packages is None:
-        print("\n[!] Could not find site-packages in venv")
-        sys.exit(1)
+        # Method 3: Fall back to system Python
+        if nunchaku_path is None:
+            print("\n[.] No venv found, checking system Python...")
+            nunchaku_path = find_system_nunchaku()
+            if nunchaku_path:
+                print(f"  Nunchaku (system): {nunchaku_path}")
 
-    print(f"  Site-packages: {site_packages}")
-
-    # Find nunchaku
-    nunchaku_path = find_nunchaku_in_venv(site_packages)
     if nunchaku_path is None:
-        print("\n[!] Nunchaku not found in ComfyUI's environment")
-        print("  Please install nunchaku first")
+        print("\n[!] Nunchaku not found!")
+        print("  Options:")
+        print("  1. Install nunchaku first: pip install nunchaku")
+        print("  2. Specify the path manually: --nunchaku-path /path/to/nunchaku")
         sys.exit(1)
-
-    print(f"  Nunchaku: {nunchaku_path}")
 
     # Find ComfyUI-nunchaku
     comfyui_nunchaku = find_comfyui_nunchaku(comfyui_path)
