@@ -149,11 +149,6 @@ def patch_multiline_import(init_path: Path, from_module: str, class_name: str, d
 
     content = init_path.read_text()
 
-    # Check if already present
-    if class_name in content:
-        print(f"  [.] {class_name} already in {init_path.name}")
-        return True
-
     # Find the multi-line import from the specified module
     pattern = rf'(from \.{re.escape(from_module)} import \()([^)]*?)(\))'
     match = re.search(pattern, content, re.DOTALL)
@@ -163,6 +158,10 @@ def patch_multiline_import(init_path: Path, from_module: str, class_name: str, d
         single_pattern = rf'from \.{re.escape(from_module)} import ([^\n(]+)'
         single_match = re.search(single_pattern, content)
         if single_match:
+            # Check if class is already in the single-line import
+            if class_name in single_match.group(1):
+                print(f"  [.] {class_name} already imported from .{from_module} in {init_path.name}")
+                return True
             # Convert to include our class
             old_imports = single_match.group(1).strip()
             new_line = f"from .{from_module} import (\n    {class_name},\n    {old_imports},\n)"
@@ -171,13 +170,17 @@ def patch_multiline_import(init_path: Path, from_module: str, class_name: str, d
             print(f"  [?] Warning: Could not find import from .{from_module} in {init_path.name}")
             return False
     else:
+        # Check if class is already in the multi-line import
+        if class_name in match.group(2):
+            print(f"  [.] {class_name} already imported from .{from_module} in {init_path.name}")
+            return True
         # Add to existing multi-line import
         existing_imports = match.group(2)
         # Add the new class at the beginning
         new_imports = f"\n    {class_name}," + existing_imports
         content = content[:match.start()] + match.group(1) + new_imports + match.group(3) + content[match.end():]
 
-    # Also add to __all__ if present
+    # Also add to __all__ if present and not already there
     if "__all__" in content:
         all_pattern = r'(__all__\s*=\s*\[)([^\]]*?)(\])'
         all_match = re.search(all_pattern, content, re.DOTALL)
@@ -194,7 +197,7 @@ def patch_multiline_import(init_path: Path, from_module: str, class_name: str, d
         if not backup.exists():
             shutil.copy(init_path, backup)
         init_path.write_text(content)
-        print(f"  [+] Modified: {init_path.name}")
+        print(f"  [+] Modified: {init_path.name} (added {class_name} to import from .{from_module})")
 
     return True
 
