@@ -281,11 +281,8 @@ def build_single_wheel(
             raise RuntimeError("No dist-info directory found in wheel")
         dist_info_dir = dist_info_dirs[0]
 
-        # Rename dist-info to match new package name
-        new_dist_info_name = f"nunchaku_chroma-{version}+{torch_ver}.dist-info"
-        new_dist_info_dir = extract_dir / new_dist_info_name
-        dist_info_dir.rename(new_dist_info_dir)
-        dist_info_dir = new_dist_info_dir
+        # Keep original dist-info name (nunchaku) so it's a drop-in replacement
+        # This ensures ComfyUI-nunchaku can detect the package
 
         # Inject Chroma files
         print(f"  Injecting Chroma files...")
@@ -295,9 +292,8 @@ def build_single_wheel(
         print(f"  Patching __init__.py files...")
         patch_init_files(extract_dir)
 
-        # Update metadata
-        print(f"  Updating metadata...")
-        update_metadata(dist_info_dir)
+        # Keep original metadata (nunchaku) - don't rename to nunchaku-chroma
+        # This makes it a true drop-in replacement
 
         # Regenerate RECORD
         print(f"  Regenerating RECORD...")
