@@ -191,7 +191,7 @@ class NunchakuChromaDiTLoader:
         import folder_paths
         from comfy.supported_models import FluxSchnell
         from nunchaku import NunchakuChromaTransformer2DModel
-        from ...wrappers.chroma import ComfyChromaWrapper
+        from .wrapper import ComfyChromaWrapper
 
         device = torch.device(f"cuda:{device_id}")
 

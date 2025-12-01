@@ -11,7 +11,7 @@ import folder_paths
 
 from nunchaku.lora.flux import to_diffusers
 
-from ...wrappers.chroma import ComfyChromaWrapper
+from .wrapper import ComfyChromaWrapper
 
 # Get log level from environment variable (default to INFO)
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
