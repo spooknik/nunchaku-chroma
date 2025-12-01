@@ -2,13 +2,17 @@
 
 Repackaged [Nunchaku](https://github.com/mit-han-lab/nunchaku) with built-in [Chroma](https://github.com/lodestones/Chroma) model support for fast 4-bit quantized inference.
 
+## ⚠️ This project is still WiP ⚠️
+
 ## Overview
 
 This package provides `nunchaku-chroma`, a drop-in replacement for `nunchaku` with Chroma support built-in.
 
 ## Installation
 
-### From GitHub Releases (Recommended)
+### 
+
+### From GitHub Releases
 
 Download the wheel for your platform, Python version, and PyTorch version:
 
@@ -141,26 +145,3 @@ python build_wheels.py
 # Built wheels are in dist/
 ```
 
-## Troubleshooting
-
-### "mat1 and mat2 shapes cannot be multiplied"
-
-This usually means latent packing is not working correctly. Make sure you're using the ComfyUI wrapper which handles the conversion between 16-channel and 64-channel formats.
-
-### "missing required positional argument 'y'"
-
-The wrapper's forward method needs `y=None` and `guidance=None` as optional keyword arguments. This is handled in the included wrapper.
-
-### "No module named 'nunchaku.lora.chroma'"
-
-Make sure you installed `nunchaku-chroma`, not the original `nunchaku` package.
-
-### LoRA has no effect
-
-1. Check that the LoRA format is supported (ComfyUI/Kohya or diffusers format)
-2. Verify the LoRA was trained for Chroma (not FLUX - they have different architectures)
-3. Check ComfyUI logs for any conversion warnings
-
-## License
-
-MIT License
