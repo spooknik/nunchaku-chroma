@@ -4,12 +4,7 @@ Repackaged [Nunchaku](https://github.com/mit-han-lab/nunchaku) with built-in [Ch
 
 ## Overview
 
-Chroma is a FLUX-based diffusion model that requires specific handling:
-- Uses **packed latents** (64 channels) instead of unpacked (16 channels)
-- Uses `patch_size=1` instead of FLUX's `patch_size=2`
-- Architecture: 19 double transformer blocks + 38 single transformer blocks
-
-This package provides `nunchaku-chroma`, a drop-in replacement for `nunchaku` with Chroma support built-in. Since Chroma reuses FLUX's CUDA kernels, **no recompilation is needed**.
+This package provides `nunchaku-chroma`, a drop-in replacement for `nunchaku` with Chroma support built-in.
 
 ## Installation
 
