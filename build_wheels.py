@@ -119,7 +119,7 @@ def patch_init_files(package_dir: Path) -> None:
     transformers_init = nunchaku_dir / "models" / "transformers" / "__init__.py"
     patch_init_file(
         transformers_init,
-        "from .transformer_chroma import NunchakuChromaTransformer2DModel",
+        "try:\n    from .transformer_chroma import NunchakuChromaTransformer2DModel\nexcept ImportError:\n    pass  # Chroma support requires diffusers with Chroma",
         "__all__ export for Chroma"
     )
 
@@ -127,7 +127,7 @@ def patch_init_files(package_dir: Path) -> None:
     models_init = nunchaku_dir / "models" / "__init__.py"
     patch_init_file(
         models_init,
-        "from .transformers.transformer_chroma import NunchakuChromaTransformer2DModel",
+        "try:\n    from .transformers.transformer_chroma import NunchakuChromaTransformer2DModel\nexcept ImportError:\n    pass  # Chroma support requires diffusers with Chroma",
         "models __init__ Chroma export"
     )
 
@@ -135,7 +135,7 @@ def patch_init_files(package_dir: Path) -> None:
     nunchaku_init = nunchaku_dir / "__init__.py"
     patch_init_file(
         nunchaku_init,
-        "from .models.transformers.transformer_chroma import NunchakuChromaTransformer2DModel",
+        "try:\n    from .models.transformers.transformer_chroma import NunchakuChromaTransformer2DModel\nexcept ImportError:\n    pass  # Chroma support requires diffusers with Chroma",
         "top-level Chroma export"
     )
 
@@ -144,7 +144,7 @@ def patch_init_files(package_dir: Path) -> None:
     if lora_init.exists():
         patch_init_file(
             lora_init,
-            "from . import chroma",
+            "try:\n    from . import chroma\nexcept ImportError:\n    pass  # Chroma LoRA support requires diffusers with Chroma",
             "lora chroma submodule import"
         )
 
