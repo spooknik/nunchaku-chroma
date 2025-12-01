@@ -246,11 +246,12 @@ def build_single_wheel(
     output_dir: Path
 ) -> Optional[Path]:
     """Build a single repackaged wheel."""
-    print(f"\nBuilding: nunchaku-chroma-{version}+{torch_ver}-{py_ver}-{platform}")
+    print(f"\nBuilding: nunchaku (with Chroma)-{version}+{torch_ver}-{py_ver}-{platform}")
 
     # Construct URLs and filenames
     url, orig_filename = construct_wheel_url(version, torch_ver, py_ver, platform)
-    new_filename = f"nunchaku_chroma-{version}+{torch_ver}-{py_ver}-{py_ver}-{platform}.whl"
+    # Keep the original nunchaku filename since we're keeping the package name as nunchaku
+    new_filename = f"nunchaku-{version}+{torch_ver}-{py_ver}-{py_ver}-{platform}.whl"
     output_path = output_dir / new_filename
 
     # Skip if already exists

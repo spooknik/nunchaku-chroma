@@ -14,7 +14,7 @@
     "cp312",
     "cp313"
   ],
-  "filename_template": "nunchaku_chroma-{version}+{torch_version}-{python_version}-{python_version}-{platform}.whl",
+  "filename_template": "nunchaku-{version}+{torch_version}-{python_version}-{python_version}-{platform}.whl",
   "url_templates": {
     "github": "https://github.com/spooknik/nunchaku-chroma/releases/download/{version_tag}/{filename}"
   }
