@@ -22,7 +22,7 @@ from torch import nn
 from torch.nn import GELU
 
 from nunchaku.ops.fused import fused_gelu_mlp
-from nunchaku.utils import get_precision, pad_tensor
+from nunchaku.utils import get_precision, pad_tensor, check_hardware_compatibility
 from nunchaku.models.attention import NunchakuBaseAttention, NunchakuFeedForward
 from nunchaku.models.attention_processors.flux import NunchakuFluxFA2Processor, NunchakuFluxFP16AttnProcessor
 from nunchaku.models.embeddings import NunchakuFluxPosEmbed, pack_rotemb
@@ -281,14 +281,18 @@ class NunchakuChromaSingleTransformerBlock(ChromaSingleTransformerBlock):
         # Chroma's pruned norm layer - keep as-is
         self.norm = block.norm
 
+        # MLP path: dim -> mlp_hidden_dim -> dim (split projections like FLUX)
         self.mlp_fc1 = SVDQW4A4Linear.from_linear(block.proj_mlp, **kwargs)
         self.act_mlp = block.act_mlp
+        # mlp_fc2: mlp_hidden_dim -> dim (NOT concatenated input)
         self.mlp_fc2 = SVDQW4A4Linear.from_linear(block.proj_out, in_features=self.mlp_hidden_dim, **kwargs)
-        # For int4, we shift the activation of mlp_fc2 to make it unsigned.
+        # For int4, shift the activation of mlp_fc2 to make it unsigned.
         self.mlp_fc2.act_unsigned = self.mlp_fc2.precision != "nvfp4"
 
+        # Attention with separate output projection
         self.attn = NunchakuChromaAttention(block.attn, **kwargs)
-        self.attn.to_out = SVDQW4A4Linear.from_linear(block.proj_out, in_features=self.mlp_fc1.in_features, **kwargs)
+        # attn.to_out: dim -> dim
+        self.attn.to_out = SVDQW4A4Linear.from_linear(block.proj_out, in_features=block.proj_mlp.in_features, **kwargs)
 
     def forward(
         self,
@@ -322,17 +326,17 @@ class NunchakuChromaSingleTransformerBlock(ChromaSingleTransformerBlock):
         residual = hidden_states
         norm_hidden_states, gate = self.norm(hidden_states, emb=temb)
 
-        # Feedforward
+        # MLP path: dim -> mlp_hidden_dim -> dim
         if isinstance(self.act_mlp, GELU):
             # Use fused GELU MLP for efficiency.
-            mlp_hidden_states = fused_gelu_mlp(norm_hidden_states, self.mlp_fc1, self.mlp_fc2)
+            mlp_output = fused_gelu_mlp(norm_hidden_states, self.mlp_fc1, self.mlp_fc2)
         else:
             # Fallback to original MLP.
             mlp_hidden_states = self.mlp_fc1(norm_hidden_states)
             mlp_hidden_states = self.act_mlp(mlp_hidden_states)
-            mlp_hidden_states = self.mlp_fc2(mlp_hidden_states)
+            mlp_output = self.mlp_fc2(mlp_hidden_states)
 
-        # Attention
+        # Attention path (includes to_out projection)
         joint_attention_kwargs = joint_attention_kwargs or {}
         attn_output = self.attn(
             hidden_states=norm_hidden_states,
@@ -341,9 +345,12 @@ class NunchakuChromaSingleTransformerBlock(ChromaSingleTransformerBlock):
             **joint_attention_kwargs,
         )
 
-        hidden_states = attn_output + mlp_hidden_states
+        # ADD outputs (not concatenate) - FLUX-style split architecture
+        hidden_states = attn_output + mlp_output
         gate = gate.unsqueeze(1)
         hidden_states = gate * hidden_states
+
+        # Residual connection
         hidden_states = residual + hidden_states
         if hidden_states.dtype == torch.float16:
             hidden_states = hidden_states.clip(-65504, 65504)
@@ -437,6 +444,11 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
         ), "Only safetensors are supported"
         transformer, model_state_dict, metadata = cls._build_model(pretrained_model_name_or_path, **kwargs)
         quantization_config = json.loads(metadata.get("quantization_config", "{}"))
+
+        # Check hardware compatibility (INT4 vs FP4)
+        if quantization_config:
+            check_hardware_compatibility(quantization_config, device)
+
         rank = quantization_config.get("rank", 32)
         transformer = transformer.to(torch_dtype)
 
@@ -464,10 +476,12 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
 
         for k in state_dict.keys():
             if k not in converted_state_dict:
-                assert ".wcscales" in k
-                converted_state_dict[k] = torch.ones_like(state_dict[k])
+                if ".wcscales" in k:
+                    converted_state_dict[k] = torch.ones_like(state_dict[k])
+                else:
+                    raise KeyError(f"Missing key in converted state dict: {k}")
             else:
-                assert state_dict[k].dtype == converted_state_dict[k].dtype
+                assert state_dict[k].dtype == converted_state_dict[k].dtype, f"Dtype mismatch for {k}"
 
         # Load the wtscale from the converted state dict.
         for n, m in transformer.named_modules():
@@ -911,11 +925,18 @@ def convert_chroma_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, 
         if "single_transformer_blocks." in k:
             if ".qkv_proj." in k:
                 new_k = k.replace(".qkv_proj.", ".attn.to_qkv.")
-            elif ".out_proj." in k:
-                new_k = k.replace(".out_proj.", ".attn.to_out.")
             elif ".norm_q." in k or ".norm_k." in k:
                 new_k = k.replace(".norm_k.", ".attn.norm_k.")
                 new_k = new_k.replace(".norm_q.", ".attn.norm_q.")
+            elif ".mlp_fc1." in k:
+                # mlp_fc1 stays as mlp_fc1
+                new_k = k
+            elif ".mlp_fc2." in k:
+                # mlp_fc2 stays as mlp_fc2
+                new_k = k
+            elif ".out_proj." in k:
+                # out_proj -> attn.to_out (attention output projection)
+                new_k = k.replace(".out_proj.", ".attn.to_out.")
             else:
                 new_k = k
             new_k = new_k.replace(".lora_down", ".proj_down")
