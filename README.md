@@ -10,19 +10,19 @@ This package provides `nunchaku-chroma`, a drop-in replacement for `nunchaku` wi
 
 ## Installation
 
-### 
+**Wait for further updates, not stable yet**
 
-### From GitHub Releases
+~~### From GitHub Releases~~
 
-Download the wheel for your platform, Python version, and PyTorch version:
+~~Download the wheel for your platform, Python version, and PyTorch version:~~
 
-```bash
-# Example: Python 3.12, PyTorch 2.7, Linux
-pip install https://github.com/spooknik/nunchaku-chroma/releases/download/v1.0.2/nunchaku_chroma-1.0.2+torch2.7-cp312-cp312-linux_x86_64.whl
+~~```bash~~
+~~# Example: Python 3.12, PyTorch 2.7, Linux
+pip install https://github.com/spooknik/nunchaku-chroma/releases/download/v1.0.2/nunchaku_chroma-1.0.2+torch2.7-cp312-cp312-linux_x86_64.whl~~
 
-# Example: Python 3.12, PyTorch 2.8, Windows
-pip install https://github.com/spooknik/nunchaku-chroma/releases/download/v1.0.2/nunchaku_chroma-1.0.2+torch2.8-cp312-cp312-win_amd64.whl
-```
+~~# Example: Python 3.12, PyTorch 2.8, Windows
+pip install https://github.com/spooknik/nunchaku-chroma/releases/download/v1.0.2/nunchaku_chroma-1.0.2+torch2.8-cp312-cp312-win_amd64.whl~~
+~~```~~
 
 ### Supported Configurations
 
@@ -144,4 +144,5 @@ python build_wheels.py
 
 # Built wheels are in dist/
 ```
+
 
