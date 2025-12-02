@@ -1,45 +1,28 @@
 # Nunchaku Chroma
 
-Repackaged [Nunchaku](https://github.com/mit-han-lab/nunchaku) with built-in [Chroma](https://github.com/lodestones/Chroma) model support for fast 4-bit quantized inference.
-
-## ⚠️ This project is still WiP ⚠️
-
-## Overview
-
-This package provides `nunchaku-chroma`, a drop-in replacement for `nunchaku` with Chroma support built-in.
+Adds [Chroma](https://github.com/lodestones/Chroma) model support to [Nunchaku](https://github.com/mit-han-lab/nunchaku) for fast 4-bit quantized inference.
 
 ## Installation
 
-### 
+### Requirements
 
-### From GitHub Releases
+- Python 3.10+
+- PyTorch 2.0+
+- CUDA-capable GPU
 
-Download the wheel for your platform, Python version, and PyTorch version:
+### Install from PyPI
 
 ```bash
-# Example: Python 3.12, PyTorch 2.7, Linux
-pip install https://github.com/spooknik/nunchaku-chroma/releases/download/v1.0.2/nunchaku_chroma-1.0.2+torch2.7-cp312-cp312-linux_x86_64.whl
-
-# Example: Python 3.12, PyTorch 2.8, Windows
-pip install https://github.com/spooknik/nunchaku-chroma/releases/download/v1.0.2/nunchaku_chroma-1.0.2+torch2.8-cp312-cp312-win_amd64.whl
+pip install nunchaku nunchaku-chroma
 ```
 
-### Supported Configurations
+### Install from source
 
-| Platform | Python | PyTorch |
-|----------|--------|---------|
-| Linux x86_64 | 3.10, 3.11, 3.12, 3.13 | 2.7, 2.8, 2.9, 2.10 |
-| Windows AMD64 | 3.10, 3.11, 3.12, 3.13 | 2.7, 2.8, 2.9, 2.10 |
-
-### Finding Your Configuration
-
-```python
-import sys
-import torch
-
-print(f"Python: cp{sys.version_info.major}{sys.version_info.minor}")
-print(f"PyTorch: torch{'.'.join(torch.__version__.split('.')[:2])}")
-print(f"Platform: {'linux_x86_64' if sys.platform == 'linux' else 'win_amd64'}")
+```bash
+pip install nunchaku
+git clone https://github.com/spooknik/nunchaku-chroma.git
+cd nunchaku-chroma
+pip install -e .
 ```
 
 ## Usage
@@ -48,12 +31,13 @@ print(f"Platform: {'linux_x86_64' if sys.platform == 'linux' else 'win_amd64'}")
 
 ```python
 from diffusers import ChromaPipeline
-from nunchaku import NunchakuChromaTransformer2DModel
+from nunchaku_chroma import NunchakuChromaTransformer2DModel
 import torch
 
 # Load quantized transformer
 transformer = NunchakuChromaTransformer2DModel.from_pretrained(
     "path/to/quantized-chroma.safetensors",
+    device="cuda",
     torch_dtype=torch.bfloat16,
 )
 
@@ -74,25 +58,15 @@ image = pipe(
 image.save("output.png")
 ```
 
-### ComfyUI
-
-1. Install `nunchaku-chroma` wheel (see above)
-2. Install [ComfyUI-nunchaku](https://github.com/nunchaku-tech/ComfyUI-nunchaku)
-3. Place your quantized Chroma model in `ComfyUI/models/diffusion_models/`
-4. Use the **"Nunchaku Chroma DiT Loader"** node
-
-## LoRA Support
-
-Chroma LoRAs are fully supported with automatic format conversion and strength control.
-
-### Diffusers API
+### LoRA Support
 
 ```python
-from nunchaku import NunchakuChromaTransformer2DModel
+from nunchaku_chroma import NunchakuChromaTransformer2DModel
 
 # Load quantized model
 transformer = NunchakuChromaTransformer2DModel.from_pretrained(
     "path/to/quantized-chroma.safetensors",
+    device="cuda",
     torch_dtype=torch.bfloat16,
 )
 
@@ -112,36 +86,31 @@ transformer.update_lora_params_multi([
 ])
 ```
 
-### Composing Multiple LoRAs
+### ComfyUI
 
-You can pre-compose multiple LoRAs into a single file:
+For ComfyUI integration, use the [comfyui-nunchaku-chroma](https://github.com/spooknik/comfyui-nunchaku-chroma) custom node:
 
 ```bash
-python -m nunchaku.lora.chroma.compose \
-    -i lora1.safetensors lora2.safetensors \
-    -s 0.8 0.5 \
-    -o composed_lora.safetensors
+# Install dependencies
+pip install nunchaku nunchaku-chroma
+
+# Install the ComfyUI node
+cd ComfyUI/custom_nodes
+git clone https://github.com/spooknik/comfyui-nunchaku-chroma.git
+
+# Restart ComfyUI
 ```
 
-### Supported LoRA Formats
+The following nodes will be available:
+- **Nunchaku Chroma DiT Loader** - Load quantized Chroma models
+- **Nunchaku Chroma LoRA Loader** - Apply a single LoRA
+- **Nunchaku Chroma LoRA Stack** - Apply multiple LoRAs at once
+
+## Supported LoRA Formats
 
 - **ComfyUI/Kohya format**: `lora_unet_double_blocks_*`, `lora_unet_single_blocks_*`
 - **Diffusers format**: `transformer_blocks.*.lora_A.weight`, etc.
 
-## Building Wheels Locally
+## License
 
-To build wheels yourself:
-
-```bash
-git clone https://github.com/spooknik/nunchaku-chroma.git
-cd nunchaku-chroma
-
-# Build single wheel
-python build_wheels.py --single torch2.7 cp312 linux_x86_64
-
-# Build all wheels
-python build_wheels.py
-
-# Built wheels are in dist/
-```
-
+Apache-2.0
