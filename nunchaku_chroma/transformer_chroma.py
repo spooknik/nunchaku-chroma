@@ -521,16 +521,17 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
                     converted_state_dict[k] = torch.ones_like(state_dict[k])
                 else:
                     raise KeyError(f"Missing key in converted state dict: {k}")
-            else:
-                assert state_dict[k].dtype == converted_state_dict[k].dtype, f"Dtype mismatch for {k}"
 
-        # Load the wtscale from the converted state dict.
+        # Load state dict with assign=True to handle dtype mismatches for non-quantized layers
+        # This allows the model to accept weights of different dtypes and assign them directly
+
+        # Load the wtscale from the converted state dict first (before load_state_dict).
         for n, m in transformer.named_modules():
             if isinstance(m, SVDQW4A4Linear):
                 if m.wtscale is not None:
                     m.wtscale = converted_state_dict.pop(f"{n}.wtscale", 1.0)
 
-        transformer.load_state_dict(converted_state_dict)
+        transformer.load_state_dict(converted_state_dict, assign=True)
 
         # Store original in_channels and base state for LoRA support
         transformer._original_in_channels = transformer.config.in_channels
