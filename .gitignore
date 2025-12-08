@@ -29,3 +29,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+svdq-fp4_r32-Chroma-HD.safetensors
+svdq-int4_r32-Chroma-HD.safetensors
+int4-5-chroma-hd.safetensors
+.claude/settings.local.json

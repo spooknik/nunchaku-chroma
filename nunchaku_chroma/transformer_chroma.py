@@ -43,11 +43,16 @@ class NunchakuChromaAttention(NunchakuBaseAttention):
         The original FluxAttention module to wrap and quantize.
     processor : str, optional
         The attention processor to use ("flashattn2" or "nunchaku-fp16").
+    skip_quantize_to_out : bool, optional
+        If True, keep the to_out projection as a regular nn.Linear instead of quantizing.
+        This supports mixed precision models where some layers are kept at full precision.
+    skip_quantize_to_add_out : bool, optional
+        If True, keep the to_add_out projection as a regular nn.Linear instead of quantizing.
     **kwargs
         Additional arguments for quantization.
     """
 
-    def __init__(self, other: FluxAttention, processor: str = "flashattn2", **kwargs):
+    def __init__(self, other: FluxAttention, processor: str = "flashattn2", skip_quantize_to_out: bool = False, skip_quantize_to_add_out: bool = False, **kwargs):
         super(NunchakuChromaAttention, self).__init__(processor)
         self.head_dim = other.head_dim
         self.inner_dim = other.inner_dim
@@ -71,7 +76,11 @@ class NunchakuChromaAttention(NunchakuBaseAttention):
 
         if not self.pre_only:
             self.to_out = other.to_out
-            self.to_out[0] = SVDQW4A4Linear.from_linear(self.to_out[0], **kwargs)
+            if skip_quantize_to_out:
+                # Keep as regular nn.Linear for mixed precision models
+                pass
+            else:
+                self.to_out[0] = SVDQW4A4Linear.from_linear(self.to_out[0], **kwargs)
 
         if self.added_kv_proj_dim is not None:
             self.norm_added_q = other.norm_added_q
@@ -81,7 +90,11 @@ class NunchakuChromaAttention(NunchakuBaseAttention):
             with torch.device("meta"):
                 add_qkv_proj = fuse_linears([other.add_q_proj, other.add_k_proj, other.add_v_proj])
             self.add_qkv_proj = SVDQW4A4Linear.from_linear(add_qkv_proj, **kwargs)
-            self.to_add_out = SVDQW4A4Linear.from_linear(other.to_add_out, **kwargs)
+            if skip_quantize_to_add_out:
+                # Keep as regular nn.Linear for mixed precision models
+                self.to_add_out = other.to_add_out
+            else:
+                self.to_add_out = SVDQW4A4Linear.from_linear(other.to_add_out, **kwargs)
 
     def forward(
         self,
@@ -152,18 +165,22 @@ class NunchakuChromaTransformerBlock(ChromaTransformerBlock):
     ----------
     block : ChromaTransformerBlock
         The original block to wrap and quantize.
+    skip_quantize_to_out : bool, optional
+        If True, keep the attention to_out projection as regular nn.Linear.
+    skip_quantize_to_add_out : bool, optional
+        If True, keep the attention to_add_out projection as regular nn.Linear.
     **kwargs
         Additional arguments for quantization.
     """
 
-    def __init__(self, block: ChromaTransformerBlock, **kwargs):
+    def __init__(self, block: ChromaTransformerBlock, skip_quantize_to_out: bool = False, skip_quantize_to_add_out: bool = False, **kwargs):
         super(ChromaTransformerBlock, self).__init__()
 
         # Chroma's pruned norm layers don't have silu+linear, keep them as-is
         self.norm1 = block.norm1
         self.norm1_context = block.norm1_context
 
-        self.attn = NunchakuChromaAttention(block.attn, **kwargs)
+        self.attn = NunchakuChromaAttention(block.attn, skip_quantize_to_out=skip_quantize_to_out, skip_quantize_to_add_out=skip_quantize_to_add_out, **kwargs)
         self.norm2 = block.norm2
         self.norm2_context = block.norm2_context
         self.ff = NunchakuFeedForward(block.ff, **kwargs)
@@ -270,11 +287,13 @@ class NunchakuChromaSingleTransformerBlock(ChromaSingleTransformerBlock):
     ----------
     block : ChromaSingleTransformerBlock
         The original block to wrap and quantize.
+    skip_quantize_to_out : bool, optional
+        If True, keep the attention to_out projection as regular nn.Linear.
     **kwargs
         Additional arguments for quantization.
     """
 
-    def __init__(self, block: ChromaSingleTransformerBlock, **kwargs):
+    def __init__(self, block: ChromaSingleTransformerBlock, skip_quantize_to_out: bool = False, **kwargs):
         super(ChromaSingleTransformerBlock, self).__init__()
         self.mlp_hidden_dim = block.mlp_hidden_dim
 
@@ -292,7 +311,12 @@ class NunchakuChromaSingleTransformerBlock(ChromaSingleTransformerBlock):
         # Attention with separate output projection
         self.attn = NunchakuChromaAttention(block.attn, **kwargs)
         # attn.to_out: dim -> dim
-        self.attn.to_out = SVDQW4A4Linear.from_linear(block.proj_out, in_features=block.proj_mlp.in_features, **kwargs)
+        if skip_quantize_to_out:
+            # Keep as regular nn.Linear for mixed precision models
+            # Create a new Linear layer with the correct dimensions
+            self.attn.to_out = nn.Linear(block.proj_mlp.in_features, block.proj_out.out_features, bias=block.proj_out.bias is not None)
+        else:
+            self.attn.to_out = SVDQW4A4Linear.from_linear(block.proj_out, in_features=block.proj_mlp.in_features, **kwargs)
 
     def forward(
         self,
@@ -382,12 +406,15 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
         self._original_in_channels = None
         self._base_state_dict = None
 
-    def _patch_model(self, **kwargs):
+    def _patch_model(self, non_quantized_layers: set = None, **kwargs):
         """
         Patch the model with quantized transformer blocks.
 
         Parameters
         ----------
+        non_quantized_layers : set, optional
+            Set of layer prefixes that should remain as regular nn.Linear layers
+            instead of being quantized. Example: {"transformer_blocks.0.out_proj"}
         **kwargs
             Additional arguments for quantization.
 
@@ -396,11 +423,22 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
         self : NunchakuChromaTransformer2DModel
             The patched model.
         """
+        non_quantized_layers = non_quantized_layers or set()
+
         self.pos_embed = NunchakuFluxPosEmbed(dim=self.inner_dim, theta=10000, axes_dim=self.pos_embed.axes_dim)
         for i, block in enumerate(self.transformer_blocks):
-            self.transformer_blocks[i] = NunchakuChromaTransformerBlock(block, **kwargs)
+            # Check if out_proj for this block should be kept as non-quantized
+            skip_to_out = f"transformer_blocks.{i}.out_proj" in non_quantized_layers
+            skip_to_add_out = f"transformer_blocks.{i}.out_proj_context" in non_quantized_layers
+            self.transformer_blocks[i] = NunchakuChromaTransformerBlock(
+                block, skip_quantize_to_out=skip_to_out, skip_quantize_to_add_out=skip_to_add_out, **kwargs
+            )
         for i, block in enumerate(self.single_transformer_blocks):
-            self.single_transformer_blocks[i] = NunchakuChromaSingleTransformerBlock(block, **kwargs)
+            # Check if out_proj for this block should be kept as non-quantized
+            skip_to_out = f"single_transformer_blocks.{i}.out_proj" in non_quantized_layers
+            self.single_transformer_blocks[i] = NunchakuChromaSingleTransformerBlock(
+                block, skip_quantize_to_out=skip_to_out, **kwargs
+            )
         return self
 
     @classmethod
@@ -452,10 +490,13 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
         rank = quantization_config.get("rank", 32)
         transformer = transformer.to(torch_dtype)
 
+        # Detect non-quantized layers (layers with .weight but no .qweight)
+        non_quantized_layers = detect_non_quantized_layers(model_state_dict)
+
         precision = get_precision()
         if precision == "fp4":
             precision = "nvfp4"
-        transformer._patch_model(precision=precision, rank=rank)
+        transformer._patch_model(precision=precision, rank=rank, non_quantized_layers=non_quantized_layers)
 
         transformer = transformer.to_empty(device=device)
 
@@ -470,7 +511,7 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
             torch.arange(out_dim) * 1000, 2 * num_channels, flip_sin_to_cos=True, downscale_freq_shift=0
         ).to(device=device, dtype=torch_dtype)
 
-        converted_state_dict = convert_chroma_state_dict(model_state_dict)
+        converted_state_dict = convert_chroma_state_dict(model_state_dict, non_quantized_layers)
 
         state_dict = transformer.state_dict()
 
@@ -906,7 +947,52 @@ class NunchakuChromaTransformer2DModel(ChromaTransformer2DModel, NunchakuModelLo
         return Transformer2DModelOutput(sample=output)
 
 
-def convert_chroma_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def detect_non_quantized_layers(state_dict: dict[str, torch.Tensor]) -> set[str]:
+    """
+    Detect layers in the state dict that are not quantized.
+
+    A layer is considered non-quantized if it has a .weight key but no corresponding .qweight key.
+    This is used to support mixed precision models where some layers are kept at full precision.
+
+    Parameters
+    ----------
+    state_dict : dict[str, torch.Tensor]
+        The model state dict to analyze.
+
+    Returns
+    -------
+    set[str]
+        Set of layer prefixes that are non-quantized (e.g., {"transformer_blocks.0.out_proj"}).
+    """
+    # Collect all layer prefixes that have .weight
+    layers_with_weight = set()
+    layers_with_qweight = set()
+
+    for k in state_dict.keys():
+        if k.endswith(".weight"):
+            # Extract the layer prefix (everything before .weight)
+            prefix = k[:-7]  # Remove ".weight"
+            layers_with_weight.add(prefix)
+        elif k.endswith(".qweight"):
+            # Extract the layer prefix (everything before .qweight)
+            prefix = k[:-8]  # Remove ".qweight"
+            layers_with_qweight.add(prefix)
+
+    # Non-quantized layers are those with .weight but no .qweight
+    # Only consider transformer block layers that could be quantized
+    non_quantized = set()
+    for prefix in layers_with_weight:
+        if prefix not in layers_with_qweight:
+            # Only track layers in transformer_blocks or single_transformer_blocks
+            # that are candidates for quantization (out_proj, qkv_proj, mlp_fc, out_proj_context)
+            if (prefix.startswith("transformer_blocks.") or prefix.startswith("single_transformer_blocks.")):
+                if any(pattern in prefix for pattern in [".out_proj", ".qkv_proj", ".mlp_fc", ".out_proj_context"]):
+                    non_quantized.add(prefix)
+
+    return non_quantized
+
+
+def convert_chroma_state_dict(state_dict: dict[str, torch.Tensor], non_quantized_layers: set[str] = None) -> dict[str, torch.Tensor]:
     """
     Convert a state dict from the quantized Chroma format to NunchakuChromaTransformer2DModel format.
 
@@ -914,12 +1000,17 @@ def convert_chroma_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, 
     ----------
     state_dict : dict[str, torch.Tensor]
         The original state dict.
+    non_quantized_layers : set[str], optional
+        Set of layer prefixes that are non-quantized. This is used for informational purposes
+        and does not affect the key conversion logic since non-quantized layers simply have
+        different keys (.weight/.bias instead of .qweight/.wscales/etc.).
 
     Returns
     -------
     dict[str, torch.Tensor]
         The converted state dict compatible with NunchakuChromaTransformer2DModel.
     """
+    non_quantized_layers = non_quantized_layers or set()
     new_state_dict = {}
     for k, v in state_dict.items():
         if "single_transformer_blocks." in k:
