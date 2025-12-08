@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nunchaku-chroma"
-version = "0.1.1"
+version = "0.1.2"
 description = "Chroma model support for Nunchaku - quantized inference for diffusion models"
 readme = "README.md"
 license = {text = "Apache-2.0"}
